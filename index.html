@@ -33,6 +33,11 @@
         <input type="file" id="conv-file" accept=".xlsx,.xls" />
         <p class="hint">e.g. "GP Conversion Cost April 24- Apr 26.xlsx" &mdash; used to read this month's conversion cost.</p>
       </div>
+      <div class="field">
+        <label for="register-files">Third-party sales register files (optional)</label>
+        <input type="file" id="register-files" accept=".xlsx,.xls" multiple />
+        <p class="hint">This month's monthly sales report(s) for Denotics / Ironspire / Irometal / Metal Hub / Steel Bridge &mdash; fills Party and the real Destination for those 5 customers. Select as many as you have; files without a matching customer/month in the name are ignored.</p>
+      </div>
     </section>
 
     <section class="card">
@@ -66,6 +71,7 @@
   </main>
 
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
   <script src="app.js"></script>
   <script src="main.js"></script>
 </body>

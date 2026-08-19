@@ -1,6 +1,7 @@
 const rawInput = document.getElementById("raw-file");
 const templateInput = document.getElementById("template-file");
 const convInput = document.getElementById("conv-file");
+const registerInput = document.getElementById("register-files");
 const monthOverride = document.getElementById("month-override");
 const convCostOverride = document.getElementById("conv-cost-override");
 const outputNameInput = document.getElementById("output-name");
@@ -76,8 +77,13 @@ convertBtn.addEventListener("click", async () => {
     }
     log(`Conv Cost base: ${convCostBase}`);
 
+    const registerFiles = Array.from(registerInput.files || []);
+    if (registerFiles.length) {
+      log(`Third-party register files: ${registerFiles.map((f) => f.name).join(", ")}`);
+    }
+
     log(`Found ${rawRows.length} rows to convert...`);
-    const outWb = await buildOutput(rawRows, templateWb, convCostBase, log);
+    const outWb = await buildOutput(rawRows, templateWb, convCostBase, monthObj, registerFiles, log);
 
     const filename =
       outputNameInput.value.trim() ||

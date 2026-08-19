@@ -21,10 +21,49 @@ const TARGET_HEADERS = [
   "Supplier Batch", "Material", "Coating", "Prod. hierarchy", "Customer Segment",
   "Discount", "DPMT", "Freight", "Freight Per Ton", "Class", "Branch Desc",
   "Product Type", "Classification", "NSR", "Value", "TE", "ZE", "Conv Cost",
-  "Alloy Cost", "BENSR", "BE_Value",
+  "Alloy Cost", "BENSR", "BE_Value", "Zone", "Cluster", "Party",
 ];
 const COL = {};
 TARGET_HEADERS.forEach((name, i) => (COL[name] = i + 1)); // 1-indexed
+
+// Destination -> Cluster / Zone lookups, ported verbatim from the user's own
+// Excel formulas (which searched a Destination cell for these city keywords).
+// Order matters - first matching group wins, same as the IFS() it came from.
+const CLUSTER_GROUPS = [
+  ["Cluster-1", ["MARATH", "AURANG", "JALNA", "MALKAP", "JALGA", "NANDED",
+                 "LATUR", "SOLAPUR", "BEED", "MALEGA"]],
+  ["Cluster-2", ["NAGPUR", "NAGOUR", "RAIPUR", "VIDARB", "JAMNAG", "BHARUC",
+                 "WARDHA", "BILASPUR", "PUNE"]],
+  ["Cluster-3", ["HUBLI", "MYSORE", "CHENN", "CHEENN", "MADURAI", "COIMBA",
+                 "BANGAL", "BANAG", "CUDDAL", "TRICHY", "VIJAYW"]],
+  ["Cluster-4", ["GWALIO", "BHOPAL", "SATNA", "KATNI"]],
+];
+const CLUSTER_DEFAULT = "Other";
+
+const ZONE_GROUPS = [
+  ["Maharashtra", ["JALGA", "SANGLI", "AURANG", "SOLAPUR", "NAGPUR", "NAGOUR",
+                    "WARDHA", "MALEGA", "LATUR", "MALKAP", "INDAPUR", "JALNA",
+                    "PUNE", "TALOJA", "KAPSI"]],
+  ["Central", ["BHOPAL", "INDORE", "SINGRAU", "GWALIO", "SATNA", "PITHA", "KATNI"]],
+  ["East", ["RAMGAR", "RAMGART", "BOKARO", "BILASPUR", "CUTTAC", "RANCHI",
+            "RAIPUR", "ROURKE"]],
+  ["North", ["LUCKNOW", "FARIDAB", "MUNDKA", "LUDHIAN", "DELH", "NEW DEL",
+             "GHAZIAB", "PANCHKU", "JALANDH", "KANPUR", "JAIPUR", "VARANAS", "BANDA"]],
+  ["West", ["KHEDA", "SURAT", "DEESA", "AHMEDAB", "JAMNAG", "BHARUC"]],
+  ["South", ["PALAKK", "BANGAL", "BANAG", "CHENN", "CHEENN", "HYDERAB", "TELANG",
+             "RANGAR", "PASHAM", "PATANC", "SALEM", "COIMBA", "ERODE", "ERNAKU",
+             "ERNAV", "VIJAYW", "CUDDAL", "HUBLI", "TRICHY"]],
+];
+const ZONE_DEFAULT = "Unknown";
+
+function buildLookupFormula(cellRef, groups, defaultLabel) {
+  const clauses = groups.map(([label, keywords]) => {
+    const searches = keywords.map((kw) => `ISNUMBER(SEARCH("${kw}",${cellRef}))`).join(",");
+    return `OR(${searches}),"${label}"`;
+  });
+  clauses.push(`TRUE,"${defaultLabel}"`);
+  return `IFERROR(_xlfn.IFS(${clauses.join(",")}),"${defaultLabel}")`;
+}
 
 const DIRECT_FIELDS = [
   "Sales Group", "Cust. Name", "SO No./Item", "Inv.No./Item", "Inv.Date",
@@ -66,10 +105,15 @@ const MONTH_NAMES = [
   "September", "October", "November", "December",
 ];
 
-// Customers for whom NSR = UPR + DPMT. Every other customer uses
-// NSR = UPR - Freight Per Ton. Confirmed against MRM-July 2026.XLSX: 0
-// mismatches across all 4200 rows using this exact rule.
-const NSR_UPR_PLUS_DPMT_CUSTOMERS = [
+// These 5 are Evonith's trading-customer subsidiaries: they buy from Evonith
+// and resell further downstream. Used for two things:
+//  1. NSR = UPR + DPMT for these customers (everyone else uses UPR - Freight Per
+//     Ton). Confirmed against MRM-July 2026.XLSX: 0 mismatches across 4200 rows.
+//  2. Party/Destination get overridden from that customer's monthly third-party
+//     sales register (see loadThirdPartyRegister) when a matching file and
+//     invoice row exist, so we see who the material actually got resold to and
+//     where it actually ended up, not just the subsidiary's own warehouse.
+const TRADING_CUSTOMERS = [
   "DENOTIC", "IRONSPIRE", "IROMETAL", "METAL HUB", "STEEL BRIDGE",
 ];
 
@@ -222,6 +266,43 @@ function detectConvCostBase(wb, monthObj) {
   return null;
 }
 
+/* Third-party sales register files (Denotics/Ironspire/Irometal/Metal Hub/Steel
+   Bridge monthly sales reports) are legacy .xls, which ExcelJS can't read - use
+   SheetJS (loaded as the global `XLSX`) just for these. */
+async function parseRegisterFile(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: "array", cellDates: true });
+  const sheet = wb.Sheets["Sales "];
+  if (!sheet) return [];
+  return XLSX.utils.sheet_to_json(sheet, { range: 10, defval: null });
+}
+
+function matchesRegisterFilename(filename, customerKey, monthObj) {
+  const upper = filename.toUpperCase();
+  const monthName = MONTH_NAMES[monthObj.month].toUpperCase();
+  const year = String(monthObj.year);
+  return upper.includes(customerKey) && upper.includes(monthName) && upper.includes(year);
+}
+
+async function buildThirdPartyRegisters(registerFiles, monthObj) {
+  const registers = {}; // customerKey -> {invoiceNo: {destination, buyer}}
+  for (const key of TRADING_CUSTOMERS) {
+    const match = registerFiles.find((f) => matchesRegisterFilename(f.name, key, monthObj));
+    if (!match) continue;
+    const rows = await parseRegisterFile(match);
+    const byInvoice = {};
+    for (const row of rows) {
+      const ref = row["Pur Ref. No."];
+      if (ref === null || ref === undefined || ref === "") continue;
+      const invNo = parseInt(ref, 10);
+      if (Number.isNaN(invNo)) continue;
+      byInvoice[invNo] = { destination: row["Destination"], buyer: row["Buyer"] };
+    }
+    registers[key] = byInvoice;
+  }
+  return registers;
+}
+
 function copyInfoSheet(srcWs, destWb) {
   const destWs = destWb.addWorksheet("INFO");
   srcWs.eachRow({ includeEmpty: false }, (row, rowNumber) => {
@@ -239,10 +320,14 @@ function copyInfoSheet(srcWs, destWb) {
   return destWs;
 }
 
-async function buildOutput(rawRows, templateWb, convCostBase, log) {
+async function buildOutput(rawRows, templateWb, convCostBase, monthObj, registerFiles, log) {
   const outWb = new ExcelJS.Workbook();
   const infoWs = templateWb.getWorksheet("INFO");
   if (!infoWs) throw new Error("The last-month MRM file has no 'INFO' sheet.");
+
+  const registers = registerFiles && registerFiles.length
+    ? await buildThirdPartyRegisters(registerFiles, monthObj)
+    : {};
 
   const ws = outWb.addWorksheet("Sheet1");
   copyInfoSheet(infoWs, outWb);
@@ -260,9 +345,20 @@ async function buildOutput(rawRows, templateWb, convCostBase, log) {
     const thick = toNumber(raw["Thick"]);
     const width = toNumber(raw["Width"]);
     const productType = computeProductType(prodHierarchy, thick, width);
-    const nsrFormula = NSR_UPR_PLUS_DPMT_CUSTOMERS.some((k) => custName.includes(k))
-      ? `AA${r}+AI${r}`
-      : `AA${r}-AK${r}`;
+    const tradingMatch = TRADING_CUSTOMERS.find((k) => custName.includes(k));
+    const nsrFormula = tradingMatch ? `AA${r}+AI${r}` : `AA${r}-AK${r}`;
+
+    let destination = raw["Destination"];
+    let party = null;
+    if (tradingMatch && registers[tradingMatch]) {
+      const invNoStr = String(raw["Inv.No./Item"]).split("/")[0];
+      const invNo = parseInt(invNoStr, 10);
+      const entry = !Number.isNaN(invNo) ? registers[tradingMatch][invNo] : null;
+      if (entry) {
+        if (entry.destination) destination = String(entry.destination).trim();
+        if (entry.buyer) party = String(entry.buyer).trim();
+      }
+    }
 
     DIRECT_FIELDS.forEach((field) => {
       row.getCell(COL[field]).value = raw[field];
@@ -273,6 +369,8 @@ async function buildOutput(rawRows, templateWb, convCostBase, log) {
     row.getCell(COL["Classification"]).value = classification;
     row.getCell(COL["Product Type"]).value = productType;
     row.getCell(COL["ZE"]).value = 0;
+    row.getCell(COL["Destination"]).value = destination;
+    row.getCell(COL["Party"]).value = party;
 
     const salesGroup = raw["Sales Group"];
     if (salesGroup) {
@@ -296,6 +394,8 @@ async function buildOutput(rawRows, templateWb, convCostBase, log) {
     row.getCell(COL["Alloy Cost"]).value = { formula: "INFO!$N$3" };
     row.getCell(COL["BENSR"]).value = { formula: `AP${r}-AR${r}-AS${r}-AT${r}-AU${r}` };
     row.getCell(COL["BE_Value"]).value = { formula: `AV${r}*O${r}` };
+    row.getCell(COL["Zone"]).value = { formula: buildLookupFormula(`Y${r}`, ZONE_GROUPS, ZONE_DEFAULT) };
+    row.getCell(COL["Cluster"]).value = { formula: buildLookupFormula(`Y${r}`, CLUSTER_GROUPS, CLUSTER_DEFAULT) };
 
     const invDate = raw["Inv.Date"];
     if (invDate instanceof Date) {
@@ -332,4 +432,5 @@ window.MRMConverter = {
   buildOutput,
   downloadWorkbook,
   MONTH_NAMES,
+  TRADING_CUSTOMERS,
 };
