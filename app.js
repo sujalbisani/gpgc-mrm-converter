@@ -66,6 +66,13 @@ const MONTH_NAMES = [
   "September", "October", "November", "December",
 ];
 
+// Customers for whom NSR = UPR + DPMT. Every other customer uses
+// NSR = UPR - Freight Per Ton. Confirmed against MRM-July 2026.XLSX: 0
+// mismatches across all 4200 rows using this exact rule.
+const NSR_UPR_PLUS_DPMT_CUSTOMERS = [
+  "DENOTIC", "IRONSPIRE", "IROMETAL", "METAL HUB", "STEEL BRIDGE",
+];
+
 function toNumber(v) {
   if (v === null || v === undefined) return null;
   if (v instanceof Date) return null;
@@ -247,11 +254,15 @@ async function buildOutput(rawRows, templateWb, convCostBase, log) {
     const r = i + 2;
     const row = ws.getRow(r);
     const matDesc = (raw["Material Desc"] || "").toString().trim();
+    const custName = (raw["Cust. Name"] || "").toString().toUpperCase();
     const prodHierarchy = raw["Prod. hierarchy"];
     const classification = CLASSIFICATION_MAPPING[matDesc] || matDesc;
     const thick = toNumber(raw["Thick"]);
     const width = toNumber(raw["Width"]);
     const productType = computeProductType(prodHierarchy, thick, width);
+    const nsrFormula = NSR_UPR_PLUS_DPMT_CUSTOMERS.some((k) => custName.includes(k))
+      ? `AA${r}+AI${r}`
+      : `AA${r}-AK${r}`;
 
     DIRECT_FIELDS.forEach((field) => {
       row.getCell(COL[field]).value = raw[field];
@@ -273,7 +284,7 @@ async function buildOutput(rawRows, templateWb, convCostBase, log) {
     row.getCell(COL["TA"]).value = { formula: `G${r}*O${r}` };
     row.getCell(COL["WA"]).value = { formula: `J${r}*O${r}` };
     row.getCell(COL["DPMT"]).value = { formula: `AH${r}/O${r}` };
-    row.getCell(COL["NSR"]).value = { formula: `AA${r}+AI${r}` };
+    row.getCell(COL["NSR"]).value = { formula: nsrFormula };
     row.getCell(COL["Value"]).value = { formula: `AP${r}*O${r}` };
     row.getCell(COL["TE"]).value = { formula: `VLOOKUP(G${r},INFO!E:G,3,FALSE)` };
     row.getCell(COL["Conv Cost"]).value = {
