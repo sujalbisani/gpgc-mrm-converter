@@ -424,7 +424,7 @@ async function buildOutput(rawRows, templateWb, convCostBase, monthObj, register
     const nsrFormula = tradingMatch ? `AA${r}+AI${r}` : `AA${r}-AK${r}`;
 
     let destination = raw["Destination"];
-    let party = null;
+    let party = tradingMatch ? null : raw["Cust. Name"];
     if (tradingMatch && registers[tradingMatch]) {
       const invNoStr = String(raw["Inv.No./Item"]).split("/")[0];
       const invNo = parseInt(invNoStr, 10);
