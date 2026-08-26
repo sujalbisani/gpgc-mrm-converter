@@ -117,6 +117,17 @@ const TRADING_CUSTOMERS = [
   "DENOTIC", "IRONSPIRE", "IROMETAL", "METAL HUB", "STEEL BRIDGE",
 ];
 
+// Current third-party register drop: one file per customer, named by short
+// code, no month in the filename (the user replaces it each month). Matched
+// by exact filename stem, case-insensitive.
+const REGISTER_CODE_MAP = {
+  DENOTIC: "DIPL",
+  IRONSPIRE: "IPL",
+  IROMETAL: "IAIPL",
+  "METAL HUB": "MHTPL",
+  "STEEL BRIDGE": "SBEPL",
+};
+
 function toNumber(v) {
   if (v === null || v === undefined) return null;
   if (v instanceof Date) return null;
@@ -267,16 +278,21 @@ function detectConvCostBase(wb, monthObj) {
 }
 
 /* Third-party sales register files (Denotics/Ironspire/Irometal/Metal Hub/Steel
-   Bridge monthly sales reports) are legacy .xls, which ExcelJS can't read - use
-   SheetJS (loaded as the global `XLSX`) just for these. */
-async function parseRegisterFile(file) {
+   Bridge monthly sales reports) may be legacy .xls, which ExcelJS can't read -
+   use SheetJS (loaded as the global `XLSX`) for all of these regardless of
+   format. */
+async function loadRegisterWorkbook(file) {
   const buf = await file.arrayBuffer();
-  const wb = XLSX.read(buf, { type: "array", cellDates: true });
-  const sheet = wb.Sheets["Sales "];
-  if (!sheet) return [];
-  return XLSX.utils.sheet_to_json(sheet, { range: 10, defval: null });
+  return XLSX.read(buf, { type: "array", cellDates: true });
 }
 
+function fileStem(filename) {
+  return filename.replace(/\.[^./\\]+$/, "").trim().toUpperCase();
+}
+
+/* Old-format register: sheet named 'Sales ', header row 11, 'Pur Ref. No.' /
+   'Buyer' / 'Destination' columns. Matched by customer name + month + year
+   all appearing in the filename. */
 function matchesRegisterFilename(filename, customerKey, monthObj) {
   const upper = filename.toUpperCase();
   const monthName = MONTH_NAMES[monthObj.month].toUpperCase();
@@ -284,21 +300,80 @@ function matchesRegisterFilename(filename, customerKey, monthObj) {
   return upper.includes(customerKey) && upper.includes(monthName) && upper.includes(year);
 }
 
+function parseRegisterOldFormat(wb) {
+  const sheet = wb.Sheets["Sales "];
+  if (!sheet) return {};
+  const rows = XLSX.utils.sheet_to_json(sheet, { range: 10, defval: null });
+  const out = {};
+  for (const row of rows) {
+    const ref = row["Pur Ref. No."];
+    if (ref === null || ref === undefined || ref === "") continue;
+    const invNo = parseInt(ref, 10);
+    if (Number.isNaN(invNo)) continue;
+    out[invNo] = { destination: row["Destination"], buyer: row["Buyer"] };
+  }
+  return out;
+}
+
+/* Current-format register (e.g. DIPL.xlsx): a combined Purchase+Sales sheet.
+   Sheet name and exact column position vary per file, so the header row is
+   found by scanning for a 'Destination' cell and columns are resolved by
+   label - 'Invoice No.' takes the leftmost match (the purchase-side invoice,
+   which is what our raw file's Inv.No./Item matches) and the buyer column is
+   the leftmost 'Name of the Patry/Party' header that isn't the Consignee one. */
+function findRegisterHeader(rows) {
+  const maxRow = Math.min(rows.length, 15);
+  for (let r = 0; r < maxRow; r++) {
+    const row = rows[r] || [];
+    const maxCol = Math.min(row.length, 60);
+    const entries = [];
+    for (let c = 0; c < maxCol; c++) {
+      const v = row[c];
+      if (typeof v === "string" && v.trim()) entries.push([c, v.trim().toUpperCase()]);
+    }
+    if (!entries.some(([, v]) => v === "DESTINATION")) continue;
+    const destCol = entries.find(([, v]) => v === "DESTINATION")[0];
+    const invEntry = entries.find(([, v]) => v === "INVOICE NO.");
+    const buyerEntry = entries.find(([, v]) => v.startsWith("NAME OF THE") && !v.includes("CONSIGNEE"));
+    if (invEntry && buyerEntry) {
+      return { headerRow: r, invoiceCol: invEntry[0], buyerCol: buyerEntry[0], destCol };
+    }
+  }
+  return null;
+}
+
+function parseRegisterNewFormat(wb) {
+  for (const name of wb.SheetNames) {
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, defval: null, raw: true });
+    const header = findRegisterHeader(rows);
+    if (!header) continue;
+    const { headerRow, invoiceCol, buyerCol, destCol } = header;
+    const out = {};
+    for (let r = headerRow + 1; r < rows.length; r++) {
+      const row = rows[r] || [];
+      const rawInv = row[invoiceCol];
+      if (rawInv === null || rawInv === undefined || String(rawInv).trim() === "") continue;
+      const invNo = parseInt(String(rawInv).trim(), 10);
+      if (Number.isNaN(invNo)) continue;
+      out[invNo] = { destination: row[destCol], buyer: row[buyerCol] };
+    }
+    return out;
+  }
+  return {};
+}
+
 async function buildThirdPartyRegisters(registerFiles, monthObj) {
   const registers = {}; // customerKey -> {invoiceNo: {destination, buyer}}
   for (const key of TRADING_CUSTOMERS) {
-    const match = registerFiles.find((f) => matchesRegisterFilename(f.name, key, monthObj));
-    if (!match) continue;
-    const rows = await parseRegisterFile(match);
-    const byInvoice = {};
-    for (const row of rows) {
-      const ref = row["Pur Ref. No."];
-      if (ref === null || ref === undefined || ref === "") continue;
-      const invNo = parseInt(ref, 10);
-      if (Number.isNaN(invNo)) continue;
-      byInvoice[invNo] = { destination: row["Destination"], buyer: row["Buyer"] };
+    const code = REGISTER_CODE_MAP[key];
+    const newMatch = code && registerFiles.find((f) => fileStem(f.name) === code);
+    if (newMatch) {
+      registers[key] = parseRegisterNewFormat(await loadRegisterWorkbook(newMatch));
+      continue;
     }
-    registers[key] = byInvoice;
+    const oldMatch = registerFiles.find((f) => matchesRegisterFilename(f.name, key, monthObj));
+    if (!oldMatch) continue;
+    registers[key] = parseRegisterOldFormat(await loadRegisterWorkbook(oldMatch));
   }
   return registers;
 }
