@@ -384,7 +384,7 @@ async function buildOutput(rawRows, templateWb, convCostBase, monthObj, register
     row.getCell(COL["DPMT"]).value = { formula: `AH${r}/O${r}` };
     row.getCell(COL["NSR"]).value = { formula: nsrFormula };
     row.getCell(COL["Value"]).value = { formula: `AP${r}*O${r}` };
-    row.getCell(COL["TE"]).value = { formula: `VLOOKUP(G${r},INFO!E:G,3,FALSE)` };
+    row.getCell(COL["TE"]).value = { formula: `VLOOKUP(G${r},INFO!E:G,3,TRUE)` };
     row.getCell(COL["Conv Cost"]).value = {
       formula:
         `_xlfn.IFS(F${r}="GP COIL",${convCostBase},` +
