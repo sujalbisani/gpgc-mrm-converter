@@ -378,8 +378,8 @@ async function buildThirdPartyRegisters(registerFiles, monthObj) {
   return registers;
 }
 
-function copyInfoSheet(srcWs, destWb) {
-  const destWs = destWb.addWorksheet("INFO");
+function copyInfoSheet(srcWs, destWb, sheetName) {
+  const destWs = destWb.addWorksheet(sheetName || srcWs.name);
   srcWs.eachRow({ includeEmpty: false }, (row, rowNumber) => {
     row.eachCell({ includeEmpty: false }, (cell, colNumber) => {
       const newCell = destWs.getRow(rowNumber).getCell(colNumber);
@@ -398,14 +398,22 @@ function copyInfoSheet(srcWs, destWb) {
 async function buildOutput(rawRows, templateWb, convCostBase, monthObj, registerFiles, log) {
   const outWb = new ExcelJS.Workbook();
   const infoWs = templateWb.getWorksheet("INFO");
-  if (!infoWs) throw new Error("The last-month MRM file has no 'INFO' sheet.");
+  if (!infoWs) throw new Error("The template file has no 'INFO' sheet.");
+  const zincWs = templateWb.getWorksheet("Zinc ladder");
+  if (!zincWs) {
+    throw new Error(
+      "The template file has no 'Zinc ladder' sheet (needed for the ZE/zinc-cost formula). " +
+      "Use an up-to-date template, e.g. the latest 'GP GC INFO Sheet.xlsx'."
+    );
+  }
 
   const registers = registerFiles && registerFiles.length
     ? await buildThirdPartyRegisters(registerFiles, monthObj)
     : {};
 
   const ws = outWb.addWorksheet("Sheet1");
-  copyInfoSheet(infoWs, outWb);
+  copyInfoSheet(infoWs, outWb, "INFO");
+  copyInfoSheet(zincWs, outWb, "Zinc ladder");
   const headerRow = ws.getRow(1);
   TARGET_HEADERS.forEach((h, i) => (headerRow.getCell(i + 1).value = h));
   headerRow.font = { bold: true };
@@ -443,7 +451,13 @@ async function buildOutput(rawRows, templateWb, convCostBase, monthObj, register
     row.getCell(COL["Width"]).value = width;
     row.getCell(COL["Classification"]).value = classification;
     row.getCell(COL["Product Type"]).value = productType;
-    row.getCell(COL["ZE"]).value = 0;
+    row.getCell(COL["ZE"]).value = {
+      formula:
+        `IF(OR(AE${r}="",G${r}=""),"",IF(AE${r}<=80,0,` +
+        `INDEX('Zinc ladder'!$B$3:$F$38,` +
+        `1+SUMPRODUCT(--(G${r}>('Zinc ladder'!$A$3:$A$37+'Zinc ladder'!$A$4:$A$38)/2)),` +
+        `1+--(AE${r}>105)+--(AE${r}>135)+--(AE${r}>165)+--(AE${r}>227.5))))`,
+    };
     row.getCell(COL["Destination"]).value = destination;
     row.getCell(COL["Party"]).value = party;
 
@@ -459,7 +473,11 @@ async function buildOutput(rawRows, templateWb, convCostBase, monthObj, register
     row.getCell(COL["DPMT"]).value = { formula: `AH${r}/O${r}` };
     row.getCell(COL["NSR"]).value = { formula: nsrFormula };
     row.getCell(COL["Value"]).value = { formula: `AP${r}*O${r}` };
-    row.getCell(COL["TE"]).value = { formula: `VLOOKUP(G${r},INFO!E:G,3,TRUE)` };
+    row.getCell(COL["TE"]).value = {
+      formula: prodHierarchy === "GC Sheet"
+        ? `VLOOKUP(G${r},INFO!I:J,2,TRUE)`
+        : `VLOOKUP(G${r},INFO!E:G,3,TRUE)`,
+    };
     row.getCell(COL["Conv Cost"]).value = {
       formula:
         `_xlfn.IFS(F${r}="GP COIL",${convCostBase},` +
